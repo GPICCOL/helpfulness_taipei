@@ -1,50 +1,97 @@
 library("zoo")
-df <- read.csv("TripAdvisor.csv", stringsAsFactors = FALSE)
-dim(df)
-names(df) <- c("id", names(df[-1]))
+library("textcat")
+library("tm")
+library("openNLP")
+FILE <- "df.Rdata"
 
-nreviews <- xtabs(~review_date + hotel, data = df)
-nreviews <- apply(nreviews, 2, function(x) rev(cumsum(rev(x))))
-df$nreviews <- nreviews[cbind(as.character(df$review_date), df$hotel)]
-
-df[ , c("mobile", "stay_type", "hotel")] <- lapply(df[ , c("mobile", "stay_type", "hotel")], as.factor)
-df[ , c("stay_date", "review_date", "response_date")] <- lapply(df[ , c("stay_date", "review_date", "response_date")], as.Date, format = "%Y-%m-%d")
-df$stay_date <- as.yearmon(df$stay_date)
-summary(df)
-sapply(df[, c("value", "rooms", "sleep_quality", "location",  "cleanliness", "service_r")], table, useNA = "always")
-tr <- function(x) {
-  is.na(x[which(x == 0)]) <- TRUE
-  return(x)
+if (FILE %in% list.files()) load(FILE) else {
+  df <- read.csv("TripAdvisor.csv", stringsAsFactors = FALSE)
+  dim(df)
+  names(df) <- c("id", names(df[-1]))
+  
+  df$r_lang <- textcat::textcat(df$text)
+  df$res_lang <- textcat::textcat(df$response)
+  
+  df$responded <- ifelse(is.na(df$response_date), F, T)
+  
+  nreviews <- xtabs(~review_date + hotel, data = df)
+  nreviews <- apply(nreviews, 2, function(x) rev(cumsum(rev(x))))
+  df$nreviews <- nreviews[cbind(as.character(df$review_date), df$hotel)]
+  
+  df[ , c("mobile", "stay_type", "hotel")] <- lapply(df[ , c("mobile", "stay_type", "hotel")], as.factor)
+  df[ , c("stay_date", "review_date", "response_date")] <- lapply(df[ , c("stay_date", "review_date", "response_date")], as.Date, format = "%Y-%m-%d")
+  df$stay_date <- as.yearmon(df$stay_date)
+  summary(df)
+  sapply(df[, c("value", "rooms", "sleep_quality", "location",  "cleanliness", "service_r")], table, useNA = "always")
+  tr <- function(x) {
+    is.na(x[which(x == 0)]) <- TRUE
+    return(x)
+  }
+  df[, c("value", "rooms", "sleep_quality", "location",  "cleanliness", "service_r")] <- lapply(df[ , c("value", "rooms", "sleep_quality", "location",  "cleanliness", "service_r")], tr)
+  sapply(df[, c("value", "rooms", "sleep_quality", "location",  "cleanliness", "service_r")], table, useNA = "always")     
+  summary(df)       
+  
+  O <- with(df, order(hotel, review_date, id))
+  odata <- df[O, c("hotel", "review_date", "id")]
+  endday <- df$review_date[which.max(df$review_date)]
+  odata$firstpage <- unlist(with(odata, tapply(review_date, hotel, 
+                                               function(x) if (length(x) > 10) c(x[-c(1:10)], rep(endday, 10)) - x else endday - x)))
+  odata$untilend <- unlist(with(odata, tapply(review_date, hotel, 
+                                              function(x) if (length(x) > 10) rep(0:1, c(length(x) - 10, 10)) else rep(1, length(x)))))				     
+  df <- merge(df, odata[, c("id", "firstpage", "untilend")], by = "id", all.x = TRUE)
+  df$rev_window <- (as.yearmon(df$review_date)-df$stay_date)*12
+  str(df)
+  save(df, file = FILE)
 }
-df[, c("value", "rooms", "sleep_quality", "location",  "cleanliness", "service_r")] <- lapply(df[ , c("value", "rooms", "sleep_quality", "location",  "cleanliness", "service_r")], tr)
-sapply(df[, c("value", "rooms", "sleep_quality", "location",  "cleanliness", "service_r")], table, useNA = "always")     
-summary(df)       
 
-O <- with(df, order(hotel, review_date, id))
-odata <- df[O, c("hotel", "review_date", "id")]
-endday <- df$review_date[which.max(df$review_date)]
-odata$firstpage <- unlist(with(odata, tapply(review_date, hotel, 
-                                             function(x) if (length(x) > 10) c(x[-c(1:10)], rep(endday, 10)) - x else endday - x)))
-odata$untilend <- unlist(with(odata, tapply(review_date, hotel, 
-                                            function(x) if (length(x) > 10) rep(0:1, c(length(x) - 10, 10)) else rep(1, length(x)))))				     
-df <- merge(df, odata[, c("id", "firstpage", "untilend")], by = "id", all.x = TRUE)
-str(df)
+dim(df)
+form <- "votes ~ log(nreviews) * I(log(firstpage + 1)) + rating + responded + hotel"
+fit <- glm(formula = form, family = "poisson", data = df)
+summary(fit)
 
-table(df$untilend)
-prop.table(table(df$untilend))
+#form <- gsub(pattern = " + hotel", replacement = "", x = form, fixed = TRUE)
+#glmm <- glmer(paste(form, "+ (1 | hotel)", sep = ""),
+#              verbose = 2, data = df, family = "poisson")
 
-vars <- df[, c("votes", "nreviews", "firstpage", "rating", "window")]
+df <- df[df$r_lang == "english" , ]
+dim(df)
+fit <- glm(formula = form, family = "poisson", data = df)
+summary(fit)
+
+reviews <- removePunctuation(x = df$text, preserve_intra_word_dashes = TRUE)
+df$review_words <- sapply(reviews, function(x) length(MC_tokenizer(x)))
+response <- removePunctuation(x = df$response, preserve_intra_word_dashes = TRUE)
+df$response_words <- sapply(response, function(x) length(MC_tokenizer(x)))
+usedata <- df[df$review_words >= 50 & df$review_words <= 1000, ]
+dim(usedata)
+usedata <- usedata[!is.na(usedata$response), ]
+dim(usedata)
+
+#sentences2 <- strsplit(df$text, "(\\. |!|\\?)")
+
+table(usedata$untilend)
+prop.table(table(usedata$untilend))
+
+vars <- usedata[, c("votes", "nreviews", "firstpage", "rating", "window", "review_words", "response_words")]
 descriptive <- t(apply(vars, 2, function(x) c(Mean = mean(x, na.rm = TRUE), SD = sd(x, na.rm = TRUE), min = min(x, na.rm = TRUE), max = max(x, na.rm = TRUE))))
 round(descriptive, digits = 2)
 
-#Not working from here on
+form <- "votes ~ log(nreviews) * I(log(firstpage + 1)) + rating + window + review_words + response_words + hotel"
+fit <- glm(formula = form, family = "poisson", data = usedata)
+summary(fit)
+
+
+glmm <- glmer(paste(form, "+ (1 | hotel)", sep = ""),
+              verbose = 2, data = usedata, family = "poisson")
+
+#Not working
 
 library("lme4")
 r_squared <- function(model) {
   X <- model.matrix(model)
   rand_formula <- reformulate(sapply(findbars(formula(model)), function(x) paste0("(", deparse(x), ")")), response=".")
-  null_mod <- update(model, rand_formula, data = review_2012)
-  VarF <- var(predict(model, REform = FALSE, type = "link"))
+  null_mod <- update(model, rand_formula, data = usedata)
+  VarF <- var(predict(model, re.form = FALSE, type = "link"))
   sigma <- unlist(VarCorr(model))
   if ("unit" %in% names(sigma)) {
     VarRand <- sum(sigma[-grep("unit", names(sigma))])
@@ -59,16 +106,16 @@ r_squared <- function(model) {
 }
 newdata <- data.frame(review_words = rep(c(50, 100, 150, 200), each = 6),
                       breadth = rep(0:5, 4),
-                      ratings.overall = mean(df$rating, na.rm = TRUE),
-                      nreviews = mean(df$nreviews),
-                      firstpage = mean(df$firstpage))
+                      rating = mean(usedata$rating, na.rm = TRUE),
+                      nreviews = mean(usedata$nreviews),
+                      firstpage = mean(usedata$firstpage))
 formula <- c("votes ~ log(nreviews) * I(log(firstpage + 1)) + rating",
-             "votes ~ log(nreviews) * I(log(firstpage + 1)) + rating + window + I(review_words^2)")
+             "votes ~ log(nreviews) * I(log(firstpage + 1)) + rating + window + review_words + I(review_words^2)")
 FILE <- c("helpfulness-null.rda", "helpfulness-base.rda")
 for (i in 1:2) {
   if (FILE[i] %in% list.files()) load(FILE[i]) else {
-    glmm <- glmer(paste(formula[i], "+ (1 | hotel) + (1 | name)", sep = ""),
-                  verbose = 2, data = df, family = "poisson")
+    glmm <- glmer(paste(formula[i], "+ (1 | hotel)", sep = ""),
+                  verbose = 2, data = usedata, family = "poisson")
     r2 <- r_squared(glmm)
     save(glmm, r2, file = FILE[i])
   }
